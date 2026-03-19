@@ -1,0 +1,234 @@
+Advanced RAG Chatbot - Flow & Implemented Components
+=========================================================
+
+1) High-level architecture
+---------------------------
+
+Frontend (Streamlit)
+  - Uploads PDFs to the backend
+  - Sends user questions to the backend chat endpoint
+  - Renders returned answers + sources
+  - Keeps UI state in `st.session_state`
+
+Backend (FastAPI, async)
+  - Stores ingested documents in PostgreSQL + pgvector
+  - Computes embeddings (local open-source or Gemini)
+  - Retrieves relevant passages (pgvector similarity, optional BM25)
+  - Optionally reranks passages (cross-encoder)
+  - Optionally uses Gemini to rewrite queries / generate the final answer
+  - Stores chat history in PostgreSQL
+
+Database
+  - `chat_sessions` + `chat_messages` for conversation history
+  - `documents` for per-page text chunks (content + embedding)
+  - `document_images` for optional image extraction (image_path + embedding)
+
+2) Backend endpoints (API v1)
+-------------------------------
+
+Base paths:
+  - Local: `http://127.0.0.1:8000/api/v1`
+  - Docker: `http://backend:8000/api/v1`
+
+`POST /upload-pdf`
+  1. For each uploaded PDF:
+     - `ingest_pdf()` extracts per-page text (and optionally images)
+     - creates `Document` rows (one per page)
+     - creates `DocumentImage` rows only when image extraction is enabled
+  2. After ingestion:
+     - `embed_and_store_documents()` computes embeddings for newly-created `Document` rows
+  3. Commits and returns `{"document_ids": [...]}`.
+
+`POST /chat`
+  1. Creates or loads a `ChatSession` (based on optional `session_id`)
+  2. Saves the user question as a `ChatMessage`
+  3. Calls `run_rag_pipeline(db, question)` to produce:
+     - `answer`
+     - `sources` (retrieved passages)
+     - `metrics` (timings for retrieval/reranking/etc.)
+  4. Saves the assistant answer as a `ChatMessage`
+  5. Returns `{"session_id", "answer", "sources", "metrics"}`.
+
+`GET /sessions`
+  - Lists all sessions.
+
+`GET /history/{session_id}`
+  - Returns ordered chat messages for a session.
+
+`DELETE /session/{session_id}`
+  - Deletes a session (and cascading messages).
+
+3) PDF ingestion flow
+-----------------------
+
+File: `backend/app/services/ingestion/pdf_ingestion.py`
+
+`ingest_pdf(db, file, storage_dir)` does:
+  - Reads the entire PDF into memory: `raw_bytes = await file.read()`
+  - Opens PDF via PyMuPDF (`fitz.open(...)`)
+  - For each page (page index):
+     - `page.get_text("text")` extracts page text
+     - Creates a `Document(content=text, extra_metadata={file_name, page_number})`
+     - If image extraction is enabled (`settings.extract_images == true`):
+         - extracts page images via `page.get_images(full=True)`
+         - renders each image via `fitz.Pixmap(...)`
+         - saves it to `${storage_dir}/{uuid}.png`
+         - creates a `DocumentImage(..., image_path=..., extra_metadata={...})`
+  - Adds documents to DB and flushes.
+
+Speed controls implemented:
+  - `INGEST_MAX_PAGES` (via `settings.ingest_max_pages`)
+     - ingestion stops after N pages
+  - `EXTRACT_IMAGES`
+     - when false (default in our speed mode), skips all image extraction
+
+4) Embedding flow
+-------------------
+
+File: `backend/app/embedding/embedder.py`
+
+`embed_texts(texts, target_dim=...)` supports two providers:
+  - Local open-source embeddings (`settings.embeddings_provider == "local"`)
+     - Loads `SentenceTransformer(settings.bge_embedding_model_name)`
+     - Runs embeddings in batches:
+         - `settings.local_embeddings_batch_size`
+     - Pads/truncates each embedding vector to `effective_dim`
+         - `effective_dim` is taken from `target_dim` or from
+           `settings.pgvector_text_embedding_dim`
+  - Gemini embeddings (`settings.embeddings_provider == "gemini"`)
+     - Uses `google.generativeai` `genai.embed_content(...)` with batching
+     - Pads/truncates to match schema dimension
+
+pgvector dimension compatibility
+-----------------------------------
+
+Your database column dimensions are fixed:
+  - `documents.embedding` is `Vector(1536)`
+  - `document_images.embedding` is `Vector(768)`
+
+If a local model outputs a different dimension (e.g. BGE 1024), we pad/truncate
+so ingestion does not fail and retrieval works consistently.
+
+Embeddings caching
+------------------
+
+The embedder uses Redis-based caching helpers:
+  - `cache_get_json()` / `cache_set_json()`
+  - Cache keys include provider + model name + effective dimension.
+
+If Redis is not installed/running, caching is disabled gracefully.
+
+5) Retrieval flow
+------------------
+
+File: `backend/app/retrieval/retriever.py`
+
+The main entry is `hybrid_search(db, query, query_embedding, top_k)`:
+  - Always runs vector search using pgvector:
+      - `vector_search()` performs:
+          - `ORDER BY embedding <=> CAST(:query_embedding AS vector)`
+  - Optionally runs BM25 full-text search:
+      - `bm25_search()` uses PostgreSQL `to_tsvector(...)` + `plainto_tsquery(...)`
+  - Merges results:
+      - Each result can have a vector score and bm25 score
+      - final score is `0.5 * vector + 0.5 * bm25`
+      - returns top-k
+
+Speed control implemented:
+  - `BM25_ENABLED=false` enables vector-only retrieval (skip BM25).
+
+Caching implemented:
+  - hybrid_search results can be cached (Redis) to reduce repeat work.
+
+6) RAG pipeline flow (chat answering)
+---------------------------------------
+
+File: `backend/app/chat/rag_pipeline.py`
+
+`run_rag_pipeline(db, question)`:
+
+A) Optional Gemini query rewrite / variants
+   - `rewrite_query(question)` (if enabled)
+   - `generate_query_variants(rewritten)` (if enabled)
+   - These are controlled by:
+       - `GEMINI_QUERY_REWRITE_ENABLED`
+       - `GEMINI_QUERY_VARIANTS_ENABLED`
+
+B) Multi-query retrieval
+   - Builds `query_texts = [rewritten] + variants`
+   - Embeds each query (`embed_texts([v])`)
+   - Calls `hybrid_search(...)` for each query
+   - Deduplicates results by document id (keeps best score)
+
+C) Optional reranking
+   - Reranker is a BGE cross-encoder (`rerank_passages`)
+   - Controlled by:
+       - `RERANKER_ENABLED`
+       - `RERANKER_TOP_K`
+   - Speed mode behavior:
+       - when reranking is disabled, simply takes the top N retrieved items.
+
+D) Context compression
+   - `compress_context(reranked, max_chars=6000)`
+   - concatenates passage content until the character limit is reached
+
+E) Final answer generation
+   - If Gemini generation is disabled (quota / flags / empty context):
+     - returns a cheap fallback answer:
+       - `context_str[:1500]` or `"Not in document."`
+   - Otherwise:
+     - calls Gemini with a strict system prompt telling it to respond with
+       exactly `Not in document.` when the answer is not in context.
+
+Gemini quota / rate-limit handling
+----------------------------------
+
+When Gemini raises `ResourceExhausted`:
+  - `_GEMINI_GENERATE_DISABLED` is set to True
+  - subsequent requests skip expensive Gemini generation steps
+
+7) Frontend flow (Streamlit)
+-----------------------------
+
+File: `frontend/app.py`
+
+Key responsibilities:
+  - Loads root `.env` so `BACKEND_URL` works in local dev.
+  - Ensures session state keys exist:
+      - `st.session_state.setdefault("session_id", None)`
+      - `st.session_state.setdefault("messages", [])`
+  - Calls backend:
+      - `/sessions` to list chat sessions
+      - `/history/{session_id}` to load messages
+      - `/upload-pdf` for ingestion
+      - `/chat` for answering
+
+8) Configuration (speed + cost controls)
+----------------------------------------
+
+All settings are loaded from the root `.env` via backend `app/core/config.py`.
+
+Cost/latency speed mode knobs:
+  - `EXTRACT_IMAGES=false`     -> skip image extraction
+  - `INGEST_MAX_PAGES=60`     -> ingest only first N pages
+  - `RERANKER_ENABLED=false`  -> skip cross-encoder reranking
+  - `RETRIEVAL_TOP_K=6`       -> fewer retrieved docs
+  - `BM25_ENABLED=false`      -> vector-only retrieval (skip BM25)
+
+Provider knobs:
+  - `EMBEDDINGS_PROVIDER=local|gemini`
+  - `GEMINI_ANSWER_ENABLED=true|false`
+
+Gemini knobs:
+  - `GEMINI_QUERY_REWRITE_ENABLED`
+  - `GEMINI_QUERY_VARIANTS_ENABLED`
+
+9) Implemented “graceful degradation”
+---------------------------------------
+
+The system is designed to avoid cascading failures:
+  - Redis is optional (if missing, caching is disabled without crashing).
+  - Gemini is optional for retrieval:
+      - if query rewrite/variants/answer generation are disabled or quota-limited,
+        the pipeline still returns something based on retrieved context.
+
