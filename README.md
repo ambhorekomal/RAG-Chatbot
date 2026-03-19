@@ -16,11 +16,56 @@ This project is a production-ready Retrieval-Augmented Generation (RAG) chatbot 
 
    - `GEMINI_API_KEY` (required if `GEMINI_ANSWER_ENABLED=true`)
 
-2. Build and start the stack:
+2. Example `.env` (place this at the project root):
+
+   ```env
+   # Frontend (Streamlit) talks to backend at this URL (local dev)
+   BACKEND_URL=http://127.0.0.1:8000/api/v1
+
+   # Postgres + pgvector (only used for local dev; Docker Compose uses service names)
+   POSTGRES_HOST=localhost
+   POSTGRES_PORT=5432
+   POSTGRES_DB=rag_db
+   POSTGRES_USER=postgres
+   POSTGRES_PASSWORD=postgres
+
+   # Redis (optional; if not running, caching is disabled)
+   REDIS_HOST=localhost
+   REDIS_PORT=6379
+   REDIS_DB=0
+
+   # Gemini (used for query rewrite/variants and/or answer generation if enabled)
+   GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
+   GEMINI_EMBEDDING_MODEL=models/gemini-embedding-001
+   GEMINI_CHAT_MODEL=gemini-2.5-flash
+
+   GEMINI_QUERY_REWRITE_ENABLED=false
+   GEMINI_QUERY_VARIANTS_ENABLED=false
+   GEMINI_ANSWER_ENABLED=true
+
+   # Embeddings provider: "local" (free) or "gemini" (paid)
+   EMBEDDINGS_PROVIDER=local
+   LOCAL_EMBEDDINGS_BATCH_SIZE=64
+   LOCAL_EMBEDDINGS_DEVICE=cpu
+
+   # Speed/cost knobs
+   RERANKER_ENABLED=false
+   RETRIEVAL_TOP_K=6
+   RERANKER_TOP_K=5
+   BM25_ENABLED=false
+
+   # PDF ingestion speed
+   EXTRACT_IMAGES=false
+   INGEST_MAX_PAGES=60
+
+   MAX_UPLOAD_SIZE_MB=50
+   ```
+
+3. Build and start the stack:
 
    - `docker-compose up --build`
 
-3. Services:
+4. Services:
 
    - Backend API: `http://localhost:8000/api`
    - Streamlit frontend: `http://localhost:8501`
@@ -148,5 +193,3 @@ List all chat sessions.
   - `RERANKER_ENABLED=false`
   - `BM25_ENABLED=false`
 - For production, configure proper CORS, logging, and secure secrets management instead of `.env`.
-
-# RAG-Chatbot
