@@ -154,8 +154,8 @@ List all chat sessions.
    - If you use your existing pgvector Docker container, make sure `.env` matches it, e.g.:
      - `POSTGRES_HOST=localhost`
      - `POSTGRES_DB=rag_db`
-     - `POSTGRES_USER=postgres`
-     - `POSTGRES_PASSWORD=postgres`
+     - `POSTGRES_USER=postgres_user`
+     - `POSTGRES_PASSWORD=postgres_password`
 
    - Redis is optional (if it isn't running, caching is automatically disabled).
 
@@ -163,8 +163,8 @@ List all chat sessions.
 
    ```bash
    docker run -d --name pgvector-db ^
-     -e POSTGRES_USER=postgres ^
-     -e POSTGRES_PASSWORD=postgres ^
+     -e POSTGRES_USER=postgres_user ^
+     -e POSTGRES_PASSWORD=postgres_password ^
      -e POSTGRES_DB=rag_db ^
      -p 5432:5432 ^
      ankane/pgvector
