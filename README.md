@@ -26,8 +26,8 @@ This project is a production-ready Retrieval-Augmented Generation (RAG) chatbot 
    POSTGRES_HOST=localhost
    POSTGRES_PORT=5432
    POSTGRES_DB=rag_db
-   POSTGRES_USER=postgres
-   POSTGRES_PASSWORD=postgres
+   POSTGRES_USER=postgres_user_you_created
+   POSTGRES_PASSWORD=postgres_password_of_your_db
 
    # Redis (optional; if not running, caching is disabled)
    REDIS_HOST=localhost
